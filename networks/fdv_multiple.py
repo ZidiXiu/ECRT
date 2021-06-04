@@ -1,5 +1,5 @@
 """
-Generalized Contrastive Learning ICA
+Generalized Contrastive Learning ICA with infoNCE loss
 """
 import torch
 import torch.nn as nn
@@ -8,7 +8,8 @@ import numpy as np
 # Type hinting
 from typing import Union, List, Optional, Any, Tuple
 from torch import FloatTensor, LongTensor
-from networks.MAF_flow_likelihood_multiple import MAF
+from networks.MAF_flow_multiple import MAF
+from torch.nn import functional as F
 
 
 class ComponentwiseTransform(nn.Module):
@@ -41,6 +42,7 @@ class ComponentwiseTransform(nn.Module):
                              dim=1)
 
 
+
 class ComponentWiseTransformWithAuxSelection(ComponentwiseTransform):
     """A special type of ``ComponentWiseTransform``
     that takes discrete auxiliary variables and
@@ -48,13 +50,13 @@ class ComponentWiseTransformWithAuxSelection(ComponentwiseTransform):
     """
     def __init__(self,
                  x_dim: int,
-                 n_aux: int,
+                 out_dim: int,
                  hidden_dim: int = 512,
                  n_layer: int = 1):
         """
         Parameters:
             x_dim: input variable dimensionality.
-            n_aux: the cardinality of the label (auxiliary variable) candidates.
+            out_dim: the embedding dimension of the label
             hidden_dim: the number of the hidden units for each hidden layer (fixed across all hidden layers).
             n_layer: the number of layers to stack.
         """
@@ -62,41 +64,24 @@ class ComponentWiseTransformWithAuxSelection(ComponentwiseTransform):
             nn.Sequential(
                 nn.Linear(1, hidden_dim), nn.ReLU(),
                 *([nn.Linear(hidden_dim, hidden_dim),
-                   nn.ReLU()] * n_layer), nn.Linear(hidden_dim, n_aux))
+                   nn.ReLU()] * n_layer), nn.Linear(hidden_dim, out_dim))
             for _ in range(x_dim)
         ])
-        # super().__init__([
-        #     nn.Sequential(
-        #         nn.Linear(1+n_aux, hidden_dim), nn.ReLU(),
-        #         *([nn.Linear(hidden_dim, hidden_dim),
-        #            nn.ReLU()] * n_layer), nn.Linear(hidden_dim, 1))
-        #     for _ in range(x_dim)])
 
-    # def __call__(self, x: FloatTensor, aux: FloatTensor):
-    #     """Perform the forward computation.
-    #     Parameters:
-    #         x: input vector.
-    #         aux: auxiliary variables.
-    #     """
-    #     outputs = torch.cat(tuple(
-    #         self.module_list[d](torch.cat([x[:, (d, )], aux], dim=1)).unsqueeze(2)
-    #                               for d in range(x.shape[1])),
-    #                         dim=2).sum(dim=2)
-    #     #result = outputs[torch.arange(len(outputs)), aux.flatten()]
-    #     return outputs.flatten()
-
-    def __call__(self, x: FloatTensor, aux: FloatTensor):
+    def __call__(self, x: FloatTensor):
         """Perform the forward computation.
         Parameters:
             x: input vector.
             aux: auxiliary variables.
         """
+        # by dimension output
+        # [batch_size, n_embedding, x_dim]
+        # sum dimensions
         outputs = torch.cat(tuple(self.module_list[d](x[:, (d, )]).unsqueeze(2)
-                                  for d in range(x.shape[1])),
-                            dim=2).sum(dim=2)
-        result = outputs[torch.arange(len(outputs)), aux.flatten()]
-        return result
-
+                                  for d in range(x.shape[1])), dim=2).sum(2)
+        
+        # [batch_size, n_embedding]
+        return outputs
 
 class _LayerWithAux(nn.Module):
     """A utility wrapper class for a layer that passes the auxiliary variables."""
@@ -126,10 +111,12 @@ class GeneralizedContrastiveICAModel(nn.Module):
 #             network: nn.Module,
             dim: int,
             n_label: int,
+            n_emb: int,
             n_steps: int,
             hidden_size: int,
             n_hidden: int,
             major_num: int,
+            tau: Optional[float] = 1.,
             componentwise_transform: Optional[ComponentwiseTransform] = None,
             linear: nn.Module = None,
             input_order: str = 'sequential'):
@@ -146,8 +133,9 @@ class GeneralizedContrastiveICAModel(nn.Module):
         if componentwise_transform is not None:
             self.componentwise_transform = componentwise_transform
         else:
+            # by dimension networks
             self.componentwise_transform = ComponentWiseTransformWithAuxSelection(
-                dim, n_label)
+                dim, n_emb)
 
         if linear is not None:
             self.linear = _LayerWithAux(linear)
@@ -156,7 +144,21 @@ class GeneralizedContrastiveICAModel(nn.Module):
         else:
             self.linear = None
             self.classification_net = self.componentwise_transform
-
+        
+        # define y linear embedding
+#         self.y_emb_level = torch.nn.Parameter(F.softmax(torch.rand(n_label, n_emb),dim=-1))
+        if n_emb == n_label:
+            self.y_emb_level = torch.nn.Parameter(torch.eye(n_emb))
+        else:
+            idx = torch.randint(n_emb,(n_label,1)).squeeze()
+            y_emb_level = torch.zeros(n_label, n_emb)
+            y_emb_level[np.arange(n_label).tolist(),idx] = 1
+            self.y_emb_level = torch.nn.Parameter(y_emb_level)
+            
+        # learnable temperature
+        self.log_tau = torch.nn.Parameter(torch.Tensor([np.log(tau)]))
+        self.criterion = torch.nn.CrossEntropyLoss(reduction='none')
+        
     def hidden(self, x: FloatTensor) -> FloatTensor:
         """Extract the hidden vector from the input data.
         Parameters:
@@ -175,31 +177,71 @@ class GeneralizedContrastiveICAModel(nn.Module):
         return logpdf
 
 
+            
+    def bilinearFDVNCE(self, data, tau = None,return_hidden = True):
 
-    def classify(self,
-                 data: Tuple[FloatTensor, FloatTensor],
-                 return_hidden: bool = True):
-        """Perform classification using the model for GCL.
-        Parameters:
-            data: tuple of input vector (shape ``(n_sample, n_dim)) and the target labels (shape ``(n_sample, )``).
-            return_hidden: whether to also return the hidden representation obtained by the model.
-        """
-        x, label = data
-        hidden = self.hidden(x)
+        '''replacing Contrastive Loss in GCL
 
-        output = self.classification_net(hidden, label)
+        features: sourse s=f(z)
+        labels: auxillary variables (labels)
+
+        temperature: hyper-parameter to tune
+        '''
+        if tau is None:
+            tau = torch.exp(self.log_tau)
+        tau = torch.sqrt(tau)    
+        z, aux = data
+        device = z.device
+        hidden = self.hidden(z)
+        # by dimension encoding
+        # [batch_size, n_emb]
+        hz = (self.norm(self.classification_net(hidden)))/tau
+        # [batch_size, n_emb]
+        hy = (self.norm(self.cat_interpolation(aux)))/tau
+        
+        # [batch_size, batch_size]
+        similarity_matrix = hz @ hy.t()
+        batch_dim = hz.size(0)
+        
+        del hz, hy, z, aux
+        pos_mask = torch.eye(batch_dim,dtype=torch.bool)
+        
+        g = similarity_matrix[pos_mask].view(batch_dim,-1)
+        g0 = similarity_matrix[~pos_mask].view(batch_dim,-1)
+            
+        del pos_mask
+        logits = g0 - g
+            
+        slogits = torch.logsumexp(logits,1).view(-1,1)
+            
+        labels = torch.tensor(range(batch_dim),dtype=torch.int64).to(device)
+        dummy_ce = self.criterion(similarity_matrix,labels) - torch.log(torch.Tensor([batch_dim]).to(device))
+        
+        del similarity_matrix
+        dummy_ce = dummy_ce.view(-1,1)
+            
+        output = dummy_ce.detach()+torch.exp(slogits-slogits.detach())-1
+        
+        del dummy_ce
+        output = torch.clamp(output,-5,15)
+        
         if return_hidden:
             return output, hidden
         else:
             return output
-
-    # def extract(self, x: FloatTensor) -> FloatTensor:
-    #     """Alias of ``hidden()``.
-    #     Parameters:
-    #         x: input tensor.
-    #     """
-    #     return self.hidden(x)
-
+        
+    def MI(self, x, y, K=10):
+        '''
+        mutual information
+        '''
+        mi = 0
+        for k in range(K):
+            # randomly permutation the batch
+            y0 = y[torch.randperm(y.size()[0])]
+            mi += self.forward(x,y,y0)
+            
+        return -mi/K   
+    
     def inv(self, x: FloatTensor) -> FloatTensor:
         """Perform inverse computation.
         Parameters:
@@ -223,3 +265,9 @@ class GeneralizedContrastiveICAModel(nn.Module):
             x: input data.
         """
         return self.forward(x)
+    
+    def norm(self,z):
+        return torch.nn.functional.normalize(z,dim=-1)
+    
+    def cat_interpolation(self, y):
+        return self.y_emb_level[y.long()]

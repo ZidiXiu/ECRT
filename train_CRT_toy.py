@@ -35,7 +35,7 @@ import sklearn.metrics
 from utils.plot import visualize_s_z_space, visualize_space
 from data.create_dataset import myDataset_nofake_dic
 from utils.trainer_util import binary_logistic_loss, idx2onehot, random_pick_wrong_target, count_rates, cross_entropy
-from networks.gcl_torch_multiple import GeneralizedContrastiveICAModel
+from networks.gcl_multiple import GeneralizedContrastiveICAModel
 from networks.EncoderNN import EncoderDecoderNN, DecoderNN
 
 # load trainer functions
@@ -88,6 +88,7 @@ parser.add_argument('--gcl_lr', '--gcl-learning-rate', default=1e-5,
 parser.add_argument('--dec_lr', '--dec-learning-rate', default=1e-4,
                     type=float, help='decoder learning rate')
 
+args = parser.parse_args()
 
 def weights_init(m):
     if isinstance(m, nn.Linear):
@@ -308,11 +309,7 @@ def train_encoder(predictionNN, opt_enc, enc_path, train_loader, valid_loader, n
 
             improved_str = "*"
 
-    #     print('====> Valid CE loss: {:.4f} \tper-class acc: {}\tImproved: {}'.format(valid_loss_.item(), class_acc, improved_str))
         print('====> Valid CE loss: {:.4f} \tImproved: {}'.format(valid_loss_.item(), improved_str))
-
-    #     check_results(gcl)
-    #     visualize_s_z_space(batched_z.detach(), batched_s.detach(), batched_sample['label'].squeeze().detach(), ['z','s'], True)
 
         if epoch - best_epoch >=10:
             print('Model stopped due to early stopping')
