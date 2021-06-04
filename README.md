@@ -1,6 +1,6 @@
-# CRT: Causal Representation Transfer
+# ECRT: Energy-based Causal Representation Transfer
 
-Code for Supercharging Imbalanced Data Learning WithCausal Representation Transfer 
+Code for Supercharging Imbalanced Data Learning With Energy-basedContrastive Representation Transfer
 
 ## Model
 
