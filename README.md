@@ -14,7 +14,7 @@ The algorithm is built with:
 
 Clone the repository, e.g.:
 ```
-git clone https://github.com/ZidiXiu/CRT.git
+git clone https://github.com/ZidiXiu/ECRT.git
 ```
 
 
