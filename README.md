@@ -1,6 +1,8 @@
 # ECRT: Energy-based Causal Representation Transfer
 
-Code for Supercharging Imbalanced Data Learning With Energy-basedContrastive Representation Transfer
+Code for Supercharging Imbalanced Data Learning With Energy-basedContrastive Representation Transfer (NeurIPS 2021)
+
+<a href="pdf/NeurIPS-2021-supercharging-imbalanced-data-learning-with-energy-based-contrastive-representation-transfer-Paper.pdf" class="image fit"><img src="pdf/workflow.png" alt=""></a>
 
 ## Model
 
